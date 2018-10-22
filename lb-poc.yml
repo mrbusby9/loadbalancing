@@ -1,0 +1,182 @@
+# CLoudformation for ALB w Target Group of ec2 instances
+
+# USER PARAMETERS
+Parameters:
+  StackName:
+    Type: String
+    Default: loadbalancing-poc
+    Description: Name used for resource naming
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+    Description: Enter t2.micro. Default is t2.micro.
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-71bc5e0b
+    Description: Select VPCId
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select Subnets for ASG Instances
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: id_rsa_slalom
+    Description: SSH Key for Instance
+
+# AWS RESOURCES
+Resources:
+
+  # SECURITY GROUP EC2 INSTANCE
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join [ "-", [ Ref: StackName, 'instance-sg' ] ]
+      GroupDescription: Allow http to client host
+      VpcId:
+        Ref: VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+
+  # SECURITY GROUP ALB
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join [ "-", [ Ref: StackName, 'alb-sg' ] ]
+      GroupDescription: Allow http to client host
+      VpcId:
+        Ref: VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+
+  # EC2 LAUNCH CONFIGURATION
+  InstanceLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          install_all:
+            - "install_nginx"
+        install_nginx:
+          packages:
+            yum:
+              nginx: []
+          commands:
+            01_configure_nginx:
+              command: "echo 'This is a Load Balancing POC' > /usr/share/nginx/html/index.html"
+            02_start_nginx:
+              command: "service nginx start"
+    Properties:
+      AssociatePublicIpAddress: true
+      EbsOptimized: false
+      ImageId: ami-0ff8a91507f77f867
+      InstanceMonitoring: False
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+        - Ref: InstanceSecurityGroup
+      UserData:
+        Fn::Base64:
+          Fn::Join: [ "", [
+            "#!/bin/bash -xe\n",
+            "yum install -y aws-cfn-bootstrap\n",
+            "/opt/aws/bin/cfn-init -v --stack ",
+            Ref: "AWS::StackName",
+            " --resource InstanceLaunchConfiguration --configsets install_all ",
+            " --region ",
+            Ref: "AWS::Region",
+            "\n",
+            "/opt/aws/bin/cfn-signal -e $? --stack ",
+            Ref: "AWS::StackName",
+            " --resource InstanceAutoscalingGroup ",
+            " --region ",
+            Ref: "AWS::Region",
+            "\n"
+
+          ] ]
+
+  # AUTOSCALING GROUP
+  InstanceAutoscalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: InstanceTargetGroup
+    Properties:
+      AutoScalingGroupName: !Join [ "-", [ Ref: StackName, 'asg' ] ]
+      VPCZoneIdentifier:
+        Ref: SubnetIds
+      DesiredCapacity: 2
+      LaunchConfigurationName:
+        Ref: InstanceLaunchConfiguration
+      MaxSize: 2
+      MinSize: 0
+      TargetGroupARNs:
+        - Ref: InstanceTargetGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: "PT15M"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: "1"
+        MaxBatchSize: "1"
+        PauseTime: "PT12M5S"
+        WaitOnResourceSignals: "true"
+
+  # TARGET GROUP
+  InstanceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name:  !Join [ "-", [ Ref: StackName, 'tg' ] ]
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId:
+        Ref: VPCId
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      UnhealthyThresholdCount: 10
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join [ "-", [ Ref: StackName, 'alb' ] ]
+      Scheme: internet-facing
+      SecurityGroups:
+        - Ref: ALBSecurityGroup
+      Subnets:
+        Ref: SubnetIds
+      Type: application
+
+  # Listener for Application Load Balancer
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: InstanceTargetGroup
+      LoadBalancerArn:
+        Ref: ApplicationLoadBalancer
+      Port: '80'
+      Protocol: HTTP
