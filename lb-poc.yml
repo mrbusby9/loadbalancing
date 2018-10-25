@@ -294,7 +294,7 @@ Resources:
       Conditions:
       - Field: path-pattern
         Values:
-        - "/test/*"
+        - "/test*"
       ListenerArn:
         Ref: ALBListener
       Priority: 2
