@@ -11,7 +11,7 @@ Parameters:
     Default: t2.micro
     AllowedValues:
       - t2.micro
-    Description: Enter t2.micro. Default is t2.micro.
+    Description: Enter t2.micro (Free Tier). Default is t2.micro.
   VPCId:
     Type: AWS::EC2::VPC::Id
     Default: vpc-71bc5e0b
@@ -65,8 +65,8 @@ Resources:
       - IpProtocol: -1
         CidrIp: 0.0.0.0/0
 
-  # EC2 LAUNCH CONFIGURATION
-  InstanceLaunchConfiguration:
+  # EC2 LAUNCH CONFIGURATION ONE
+  InstanceLaunchConfigurationOne:
     Type: AWS::AutoScaling::LaunchConfiguration
     Metadata:
       AWS::CloudFormation::Init:
@@ -78,8 +78,8 @@ Resources:
             yum:
               nginx: []
           commands:
-            01_configure_nginx:
-              command: "echo 'This is a Load Balancing POC' > /usr/share/nginx/html/index.html"
+            01_configure_landing_page:
+              command: "echo 'This is a Load Balancing POC - Target Group One' > /usr/share/nginx/html/index.html"
             02_start_nginx:
               command: "service nginx start"
     Properties:
@@ -100,34 +100,88 @@ Resources:
             "yum install -y aws-cfn-bootstrap\n",
             "/opt/aws/bin/cfn-init -v --stack ",
             Ref: "AWS::StackName",
-            " --resource InstanceLaunchConfiguration --configsets install_all ",
+            " --resource InstanceLaunchConfigurationOne --configsets install_all ",
             " --region ",
             Ref: "AWS::Region",
             "\n",
             "/opt/aws/bin/cfn-signal -e $? --stack ",
             Ref: "AWS::StackName",
-            " --resource InstanceAutoscalingGroup ",
+            " --resource InstanceAutoscalingGroupOne ",
             " --region ",
             Ref: "AWS::Region",
             "\n"
 
           ] ]
 
-  # AUTOSCALING GROUP
-  InstanceAutoscalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    DependsOn: InstanceTargetGroup
+  # EC2 LAUNCH CONFIGURATION TWO
+  InstanceLaunchConfigurationTwo:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          install_all:
+            - "install_nginx"
+        install_nginx:
+          packages:
+            yum:
+              nginx: []
+          commands:
+            01_configure_root_folder:
+              command: "mkdir /usr/share/nginx/html/test/"
+            02_configure_nginx:
+              command: "echo 'This is a Load Balancing POC - Target Group Two' > /usr/share/nginx/html/test/index.html"
+            03_start_nginx:
+              command: "service nginx start"
     Properties:
-      AutoScalingGroupName: !Join [ "-", [ Ref: StackName, 'asg' ] ]
+      AssociatePublicIpAddress: true
+      EbsOptimized: false
+      ImageId: ami-0ff8a91507f77f867
+      InstanceMonitoring: False
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+        - Ref: InstanceSecurityGroup
+      UserData:
+        Fn::Base64:
+          Fn::Join: [ "", [
+            "#!/bin/bash -xe\n",
+            "yum install -y aws-cfn-bootstrap\n",
+            "/opt/aws/bin/cfn-init -v --stack ",
+            Ref: "AWS::StackName",
+            " --resource InstanceLaunchConfigurationTwo --configsets install_all ",
+            " --region ",
+            Ref: "AWS::Region",
+            "\n",
+            "/opt/aws/bin/cfn-signal -e $? --stack ",
+            Ref: "AWS::StackName",
+            " --resource InstanceAutoscalingGroupTwo ",
+            " --region ",
+            Ref: "AWS::Region",
+            "\n"
+
+          ] ]
+
+  # AUTOSCALING GROUP ONE
+  InstanceAutoscalingGroupOne:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: InstanceTargetGroupOne
+    Properties:
+      AutoScalingGroupName: !Join [ "-", [ Ref: StackName, 'one-asg' ] ]
       VPCZoneIdentifier:
         Ref: SubnetIds
       DesiredCapacity: 2
       LaunchConfigurationName:
-        Ref: InstanceLaunchConfiguration
+        Ref: InstanceLaunchConfigurationOne
       MaxSize: 2
       MinSize: 0
       TargetGroupARNs:
-        - Ref: InstanceTargetGroup
+        - Ref: InstanceTargetGroupOne
+      Tags:
+        - Key: Name
+          Value: !Join [ "-", [ Ref: StackName, 'instance-one' ] ]
+          PropagateAtLaunch: 'true'
     CreationPolicy:
       ResourceSignal:
         Count: 2
@@ -139,11 +193,59 @@ Resources:
         PauseTime: "PT12M5S"
         WaitOnResourceSignals: "true"
 
-  # TARGET GROUP
-  InstanceTargetGroup:
+  # AUTOSCALING GROUP TWO
+  InstanceAutoscalingGroupTwo:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: InstanceTargetGroupTwo
+    Properties:
+      AutoScalingGroupName: !Join [ "-", [ Ref: StackName, 'two-asg' ] ]
+      VPCZoneIdentifier:
+        Ref: SubnetIds
+      DesiredCapacity: 2
+      LaunchConfigurationName:
+        Ref: InstanceLaunchConfigurationTwo
+      MaxSize: 2
+      MinSize: 0
+      TargetGroupARNs:
+        - Ref: InstanceTargetGroupTwo
+      Tags:
+        - Key: Name
+          Value: !Join [ "-", [ Ref: StackName, 'instance-two' ] ]
+          PropagateAtLaunch: 'true'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: "PT15M"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: "1"
+        MaxBatchSize: "1"
+        PauseTime: "PT12M5S"
+        WaitOnResourceSignals: "true"
+
+
+  # TARGET GROUP ONE
+  InstanceTargetGroupOne:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name:  !Join [ "-", [ Ref: StackName, 'tg' ] ]
+      Name:  !Join [ "-", [ Ref: StackName, 'one-tg' ] ]
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId:
+        Ref: VPCId
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      UnhealthyThresholdCount: 10
+
+  # TARGET GROUP TWO
+  InstanceTargetGroupTwo:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name:  !Join [ "-", [ Ref: StackName, 'two-tg' ] ]
       Port: 80
       Protocol: HTTP
       TargetType: instance
@@ -175,8 +277,24 @@ Resources:
       DefaultActions:
       - Type: forward
         TargetGroupArn:
-          Ref: InstanceTargetGroup
+          Ref: InstanceTargetGroupOne
       LoadBalancerArn:
         Ref: ApplicationLoadBalancer
       Port: '80'
       Protocol: HTTP
+
+  # Listener Rule for ALB Listener
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: InstanceTargetGroupTwo
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/test/*"
+      ListenerArn:
+        Ref: ALBListener
+      Priority: 2
